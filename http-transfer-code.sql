@@ -17,12 +17,13 @@ SELECT set_file('wicci-http.sql', '$Id');
 
 -- ** type http_request_refs methods
 
-CREATE OR REPLACE FUNCTION try_http_request(
-	http_request_refs, http_request_name_refs
-) RETURNS http_request_refs AS $$
-  SELECT $1 FROM http_request_rows
-	WHERE ref = $1 AND name_ = $2
-$$ LANGUAGE SQL STRICT;
+-- WHY DOES THIS EXIST??
+-- CREATE OR REPLACE FUNCTION try_http_request(
+-- 	http_request_refs, http_request_name_refs
+-- ) RETURNS http_request_refs AS $$
+--   SELECT $1 FROM http_request_rows
+-- 	WHERE ref = $1 AND name_ = $2
+-- $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE FUNCTION http_requests(
 	http_request_refs[], http_request_name_refs
@@ -54,12 +55,30 @@ CREATE OPERATOR ^ (
 );
 
 CREATE OR REPLACE
-FUNCTION http_request_text(http_request_refs)
+FUNCTION http_small_request_text(http_request_refs)
 RETURNS text AS $$
   SELECT CASE
 		WHEN name_ = http_request_name_nil() THEN ''
 		ELSE http_request_name_text(name_) || ': '
-	END || value_ FROM http_request_rows WHERE ref = $1
+	END || value_ FROM http_small_request_rows WHERE ref = $1
+$$ LANGUAGE SQL;
+
+CREATE OR REPLACE
+FUNCTION http_big_request_text(http_request_refs)
+RETURNS text AS $$
+  SELECT CASE
+		WHEN name_ = http_request_name_nil() THEN ''
+		ELSE http_request_name_text(name_) || ': '
+	END || value_ FROM http_big_request_rows WHERE ref = $1
+$$ LANGUAGE SQL;
+
+CREATE OR REPLACE
+FUNCTION http_request_text(http_request_refs)
+RETURNS text AS $$
+  SELECT CASE ref_table($1)
+		WHEN 'http_small_request_rows'::regclass THEN http_small_request_text($1)
+		WHEN 'http_big_request_rows'::regclass THEN http_big_request_text($1)
+	END
 $$ LANGUAGE SQL;
 
 CREATE OR REPLACE
@@ -78,28 +97,42 @@ RETURNS text  AS $$
 $$ LANGUAGE sql;
 
 CREATE OR REPLACE
+FUNCTION try_small_http_request(http_request_name_refs, text)
+RETURNS http_request_refs AS $$
+  SELECT ref FROM http_small_request_rows
+	WHERE name_ = $1 AND value_ = $2
+$$ LANGUAGE SQL STRICT;
+
+CREATE OR REPLACE
+FUNCTION try_big_http_request(http_request_name_refs, text)
+RETURNS http_request_refs AS $$
+  SELECT ref FROM http_big_request_rows
+	WHERE name_ = $1 AND hash_ = blob_hash($2)
+$$ LANGUAGE SQL STRICT;
+
+CREATE OR REPLACE
 FUNCTION try_http_request(http_request_name_refs, text)
 RETURNS http_request_refs AS $$
-  SELECT ref FROM http_request_rows
-	WHERE name_ = $1 AND value_ = $2
+  SELECT COALESCE( try_small_http_request($1, $2), try_big_http_request($1, $2) )
 $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE
 FUNCTION find_http_request(http_request_name_refs, text)
 RETURNS http_request_refs AS $$
   SELECT non_null(
-		try_http_request($1, $2),
+		COALESCE( try_small_http_request($1, $2), try_big_http_request($1, $2) ),
 		'find_http_request(http_request_name_refs, text)'
 	)
 $$ LANGUAGE SQL;
 
 CREATE OR REPLACE
-FUNCTION get_http_request(http_request_name_refs, text)
+FUNCTION try_get_http_request(http_request_name_refs, text)
 RETURNS http_request_refs AS $$
 DECLARE
 	maybe http_request_refs := NULL; -- unchecked_ref_null();
 	kilroy_was_here boolean := false;
 	this regprocedure := 'get_http_request(http_request_name_refs, text)';
+	big BOOLEAN := octet_length($2) > max_indexable_field_size();
 BEGIN
 	LOOP
 		maybe := try_http_request($1, $2);
@@ -109,15 +142,28 @@ BEGIN
 		END IF;
 		kilroy_was_here := true;
 		BEGIN
-			INSERT INTO http_request_rows(name_, value_)
-			VALUES ($1, $2);
+			IF big THEN
+			 INSERT INTO http_big_request_rows(name_, value_, hash_)
+			 VALUES ($1, $2, blob_hash($2));
+		ELSE
+			 INSERT INTO http_small_request_rows(name_, value_)
+			 VALUES ($1, $2);
+		END IF;
 		EXCEPTION
 			WHEN unique_violation THEN			-- another thread??
 				RAISE NOTICE '% % % raised %!', this, $1, $2, 'unique_violation';
 		END;	
 	END LOOP;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql STRICT;
+
+CREATE OR REPLACE
+FUNCTION get_http_request(http_request_name_refs, text)
+RETURNS http_request_refs AS $$
+	SELECT non_null(
+		try_get_http_request($1, $2), 'get_http_request(http_request_name_refs, text)'
+  )
+$$ LANGUAGE SQL;
 
 CREATE OR REPLACE
 FUNCTION get_http_request_(citext, text)
@@ -128,7 +174,7 @@ RETURNS http_request_refs AS $$
 			http_request_name_nil(), COALESCE($1::text, '') || ': ' || _value
 		)
 	END FROM
-		try_http_request_name($1::citext) _name,
+		try_http_request_name($1) _name,
 		COALESCE(str_trim($2), '') _value
 $$ LANGUAGE SQL;
 
@@ -156,8 +202,13 @@ $$ LANGUAGE SQL;
 -- );
 
 SELECT type_class_op_method(
-	'http_request_refs', 'http_request_rows',
-	'ref_text_op(refs)', 'http_request_text(http_request_refs)'
+	'http_request_refs', 'http_small_request_rows',
+	'ref_text_op(refs)', 'http_small_request_text(http_request_refs)'
+);
+
+SELECT type_class_op_method(
+	'http_request_refs', 'http_big_request_rows',
+	'ref_text_op(refs)', 'http_big_request_text(http_request_refs)'
 );
 
 -- ** parsing http_transfers
@@ -224,11 +275,13 @@ $$ LANGUAGE SQL STRICT;
 CREATE OR REPLACE
 FUNCTION try_parse_http_requests(text) 
 RETURNS http_request_refs[] AS $$
-	SELECT http_head( _head )
-	|| CASE
+	SELECT http_head( _head )	|| CASE
 		WHEN _body IS NULL THEN '{}'::http_request_refs[]
-		ELSE ARRAY[get_http_request(http_request_name_body(), _body)]
-	END FROM try_parse_http_head_body_($1) AS foo(_head, _body)
+		ELSE  ARRAY[try_get_http_request(http_request_name_body(), _body)]
+		-- ARRAY[ ... ] non-strict, don't use COALESCE here!
+	END FROM
+		try_parse_http_head_body_($1) AS foo(_head, _body),
+		debug_enter('try_parse_http_requests(text)', $1)
 	WHERE _head IS NOT NULL
 $$ LANGUAGE SQL STRICT;
 
@@ -277,12 +330,13 @@ $$ LANGUAGE SQL;
 
 -- ** type http_response_refs methods
 
-CREATE OR REPLACE FUNCTION try_http_response(
-	http_response_refs, http_response_name_refs
-) RETURNS http_response_refs AS $$
-  SELECT $1 FROM http_response_rows
-	WHERE ref = $1 AND name_ = $2
-$$ LANGUAGE SQL STRICT;
+-- WHY WOULD THIS EXIST??
+-- CREATE OR REPLACE FUNCTION try_http_response(
+-- 	http_response_refs, http_response_name_refs
+-- ) RETURNS http_response_refs AS $$
+--   SELECT $1 FROM http_response_rows
+-- 	WHERE ref = $1 AND name_ = $2
+-- $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE FUNCTION http_responses(
 	http_response_refs[], http_response_name_refs
@@ -291,6 +345,7 @@ CREATE OR REPLACE FUNCTION http_responses(
 	WHERE ref = ANY($1) AND name_ = $2
 $$ LANGUAGE SQL;
 
+/* IS THIS NEEDED?  DID WE WANT TEXT OR WHAT?
 CREATE OR REPLACE FUNCTION http_response_values(
 	http_response_refs[], http_response_name_refs
 ) RETURNS SETOF text AS $$
@@ -303,6 +358,7 @@ CREATE OR REPLACE FUNCTION http_response_value(
 ) RETURNS text AS $$
   SELECT http_response_values($1, $2) LIMIT 1
 $$ LANGUAGE SQL;
+*/
 
 DROP OPERATOR IF EXISTS
 	^ (http_response_refs[], http_response_name_refs) CASCADE;
@@ -310,9 +366,42 @@ DROP OPERATOR IF EXISTS
 CREATE OPERATOR ^ (
 		leftarg = http_response_refs[],
 		rightarg = http_response_name_refs,
-		procedure = http_response_value
+--		procedure = http_response_value
+		procedure = http_responses
 );
 
+CREATE OR REPLACE
+FUNCTION http_small_response_text(http_response_refs)
+RETURNS text AS $$
+  SELECT http_response_name_text(name_) || text_value
+	FROM http_small_text_response_rows WHERE ref = $1
+$$ LANGUAGE SQL;
+
+CREATE OR REPLACE
+FUNCTION http_big_response_text(http_response_refs)
+RETURNS text AS $$
+  SELECT http_response_name_text(name_) || md5(text_value)
+	FROM http_big_text_response_rows WHERE ref = $1
+$$ LANGUAGE SQL;
+
+CREATE OR REPLACE
+FUNCTION http_binary_response_text(http_response_refs)
+RETURNS text AS $$
+  SELECT http_response_name_text(name_) || md5(binary_value)
+	FROM http_binary_response_rows WHERE ref = $1
+$$ LANGUAGE SQL;
+
+CREATE OR REPLACE
+FUNCTION http_response_text(http_response_refs)
+RETURNS text AS $$
+  SELECT COALESCE(
+		http_small_response_text($1),
+		http_big_response_text($1),
+		http_binary_response_text($1)
+	)
+$$ LANGUAGE SQL;
+
+/*
 CREATE OR REPLACE
 FUNCTION http_response_text(http_response_refs)
 RETURNS text AS $$
@@ -321,6 +410,7 @@ RETURNS text AS $$
 		ELSE http_response_name_text(name_) || ': '
 	END || value_ FROM http_response_rows WHERE ref = $1
 $$ LANGUAGE SQL;
+*/
 
 CREATE OR REPLACE
 FUNCTION http_responses_text(http_response_refs[])
@@ -331,12 +421,37 @@ RETURNS text  AS $$
 $$ LANGUAGE sql;
 
 CREATE OR REPLACE
-FUNCTION try_http_response(http_response_name_refs, text)
+FUNCTION try_http_small_text_response(http_response_name_refs, text)
 RETURNS http_response_refs AS $$
-  SELECT ref FROM http_response_rows
-	WHERE name_ = $1 AND value_ = $2
+  SELECT ref FROM http_small_text_response_rows
+	WHERE name_ = $1 AND text_value = $2
 $$ LANGUAGE SQL STRICT;
 
+CREATE OR REPLACE
+FUNCTION try_http_big_text_response(http_response_name_refs, text)
+RETURNS http_response_refs AS $$
+  SELECT ref FROM http_big_text_response_rows
+	WHERE name_ = $1 AND hash_ = blob_hash($2)
+$$ LANGUAGE SQL STRICT;
+
+CREATE OR REPLACE
+FUNCTION try_http_binary_response(http_response_name_refs, bytea)
+RETURNS http_response_refs AS $$
+  SELECT ref FROM http_binary_response_rows
+	WHERE name_ = $1 AND hash_ = blob_hash($2)
+$$ LANGUAGE SQL STRICT;
+
+CREATE OR REPLACE
+FUNCTION try_http_response(http_response_name_refs, text, bytea)
+RETURNS http_response_refs AS $$
+  SELECT COALESCE(
+		try_http_small_text_response($1, $2),
+		try_http_big_text_response($1, $2),
+		try_http_binary_response($1, $3)
+	)
+$$ LANGUAGE SQL;
+
+/* NOT NEEDED??
 CREATE OR REPLACE
 FUNCTION find_http_response(http_response_name_refs, text)
 RETURNS http_response_refs AS $$
@@ -345,40 +460,56 @@ RETURNS http_response_refs AS $$
 		'find_http_response(http_response_name_refs, text)'
 	)
 $$ LANGUAGE SQL;
+*/
 
 CREATE OR REPLACE
-FUNCTION try_get_http_response(http_response_name_refs, text) 
-RETURNS http_response_refs AS $$
+FUNCTION try_get_http_response(
+	http_response_name_refs, _text_ text = NULL, _bytes_ bytea = NULL
+) RETURNS http_response_refs AS $$
 DECLARE
 	maybe http_response_refs := NULL; -- unchecked_ref_null();
 	kilroy_was_here boolean := false;
 	this regprocedure
-		:= 'try_get_http_response(http_response_name_refs, text)';
+		:= 'try_get_http_response(http_response_name_refs, text, bytea)';
+	big BOOLEAN := octet_length($2) > max_indexable_field_size();
 BEGIN
+	IF $1 IS NULL OR ($2 IS NULL AND $3 IS NULL) THEN
+		RETURN NULL;
+	END IF;
 	LOOP
-		maybe := try_http_response($1, $2);
+		maybe := try_http_response($1, $2, $3);
 		IF maybe IS NOT NULL THEN RETURN maybe; END IF;
 		IF kilroy_was_here THEN
 			RAISE EXCEPTION '% looping with % %', this, $1, $2;
 		END IF;
 		kilroy_was_here := true;
 		BEGIN
-			INSERT INTO http_response_rows(name_, value_)
-			VALUES ($1, $2);
+			IF big IS NULL THEN
+				INSERT INTO http_binary_response_rows(name_, binary_value, hash_)
+				VALUES ($1, $3, blob_hash($3));
+			ELSIF big THEN
+				INSERT INTO http_big_text_response_rows(name_, text_value, hash_)
+				VALUES ($1, $2, blob_hash($2));
+			ELSE
+				INSERT INTO http_small_text_response_rows(name_, text_value)
+				VALUES ($1, $2);
+			END IF;
 		EXCEPTION
 			WHEN unique_violation THEN			-- another thread??
 				RAISE NOTICE '% % % raised %!', this, $1, $2, 'unique_violation';
 		END;	
 	END LOOP;
 END;
-$$ LANGUAGE plpgsql STRICT;
+$$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE
-FUNCTION get_http_response(http_response_name_refs, text)
-RETURNS http_response_refs AS $$
+FUNCTION get_http_response(
+	http_response_name_refs, _text_ text = NULL, _bytes_ bytea = NULL
+) RETURNS http_response_refs AS $$
 	SELECT non_null(
-		try_get_http_response($1,$2),
-		'get_http_response(http_response_name_refs,text)'
+		try_get_http_response($1,$2, $3),
+		'get_http_response(http_response_name_refs,text,bytea)',
+		$1::text, $2
 	)
 $$ LANGUAGE sql;
 
@@ -431,8 +562,18 @@ RETURNS a value for the response header Set-Cookie, e.g.:
 $$;
 
 SELECT type_class_op_method(
-	'http_response_refs', 'http_response_rows',
-	'ref_text_op(refs)', 'http_response_text(http_response_refs)'
+	'http_response_refs', 'http_small_text_response_rows',
+	'ref_text_op(refs)', 'http_small_response_text(http_response_refs)'
+);
+
+SELECT type_class_op_method(
+	'http_response_refs', 'http_big_text_response_rows',
+	'ref_text_op(refs)', 'http_big_response_text(http_response_refs)'
+);
+
+SELECT type_class_op_method(
+	'http_response_refs', 'http_binary_response_rows',
+	'ref_text_op(refs)', 'http_binary_response_text(http_response_refs)'
 );
 
 -- * http_transfer
@@ -450,6 +591,7 @@ FUNCTION try_new_http_transfer(
 	text, OUT http_transfer_refs, OUT uri_refs, OUT uri_query_refs
 ) AS $$
 	SELECT try_new_http_transfer(parse_http_requests($1))
+	FROM debug_enter('try_new_http_transfer(text)', $1)
 $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE
@@ -457,7 +599,9 @@ FUNCTION new_http_transfer(
 	text, OUT http_transfer_refs, OUT uri_refs, OUT uri_query_refs
 ) AS $$
 	SELECT _xfer, _url, _cookies
-	FROM	try_new_http_transfer($1) foo(_xfer, _url, _cookies)
+	FROM
+		try_new_http_transfer($1) foo(_xfer, _url, _cookies),
+		debug_enter('new_http_transfer(text)', $1)
 	WHERE non_null(_xfer, 'new_http_transfer(text)') IS NOT NULL;
 $$ LANGUAGE SQL;
 COMMENT ON FUNCTION new_http_transfer(text) IS
@@ -556,9 +700,10 @@ $$ LANGUAGE sql;
 CREATE OR REPLACE FUNCTION show_http_response(
 	http_response_refs[], OUT text, OUT text
 ) RETURNS SETOF RECORD  AS $$
-	SELECT http_response_name_text(name_), value_
-	FROM unnest($1), http_response_rows
-	WHERE ref = unnest
+	SELECT name_value[1], name_value[2] FROM
+		unnest($1) response,
+		LATERAL http_response_text(response) pair,
+		LATERAL try_str_match(pair, '([^:]*): (.*)') name_value
 $$ LANGUAGE sql;
 
 CREATE OR REPLACE FUNCTION show_http_transfer(

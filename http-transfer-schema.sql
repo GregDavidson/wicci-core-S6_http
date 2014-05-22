@@ -53,87 +53,160 @@ this header name will not be sent to the browser.';
 
 SELECT
 	create_const_ref_func(
-	 	'http_response_name_refs', '_status', -5
+	 	'http_response_name_refs', '_status', -6
 	),
 	create_const_ref_func(
-	 	'http_response_name_refs', '_doctype', -4
+	 	'http_response_name_refs', '_doctype', -5
 	),
 	create_const_ref_func(
-		'http_response_name_refs', '_body_lo', -3
+		'http_response_name_refs', '_body_lo', -4
 	),														-- large object blob
 	create_const_ref_func(
-		'http_response_name_refs', '_body_hex', -2
-	),														-- not yet used!!
+		'http_response_name_refs', '_body_hex', -3
+	),
+	create_const_ref_func(
+		'http_response_name_refs', '_body_bin', -2
+	),
  create_const_ref_func('http_response_name_refs', '_body', -1);
 
 INSERT INTO http_response_name_rows(ref, name_) VALUES
 	(http_response_name_status(), '_status'),
 	(http_response_name_doctype(), '_doctype'),
 	(http_response_name_body_lo(), '_body_lo'),
-	(http_response_name_body_hex(), '_body_hex'), -- unused!!
+	(http_response_name_body_hex(), '_body_hex'),
+	(http_response_name_body_bin(), '_body_bin'),
 	(http_response_name_body(), '_body');
 
 -- * http_request
 
 SELECT create_ref_type('http_request_refs');
 
-CREATE OR REPLACE
-FUNCTION ref_ugly_text(refs, text = NULL) RETURNS text AS $$
-	SELECT '{' || s1_refs.ref_tag($1) || ',' || s1_refs.ref_id($1) || (COALESCE( ',' || md5($2), '')) || '}'
-$$ LANGUAGE sql IMMUTABLE;
+CREATE TABLE IF NOT EXISTS http_request_keys (
+	key http_request_refs PRIMARY KEY
+);
 
-COMMENT ON FUNCTION 
-ref_ugly_text(refs, text) IS
-'Converts a reference plus an optional, possibly large
-string into a single modestly-sized string by converting the
-possibly-large string to an md5 hash.';
+SELECT create_key_trigger_functions_for('http_request_keys');
 
 CREATE TABLE IF NOT EXISTS http_request_rows (
-	ref http_request_refs PRIMARY KEY,
-  name_ http_request_name_refs NOT NULL
-		REFERENCES http_request_name_rows,
-	-- value_ text -- old
-	value_ text NOT NULL	-- newdiff 2012-7-9 !!
-	--, UNIQUE (name_, value_) -- newdiff 2012-7-9!!
+	ref http_request_refs NOT NULL,
+  name_ http_request_name_refs NOT NULL,
+	value_ text NOT NULL
 );
-CREATE UNIQUE INDEX http_request_rows_ugly
-ON http_request_rows ((ref_ugly_text(name_, value_))) ;
-COMMENT ON INDEX http_request_rows_ugly IS
-'PostgreSQL does not like btree indices on text above 1/3 of
-a buffer page, i.e. 2712 bytes.  I might want to consider
-creating a hashed-text type to deal with such situations
-more generally.';
 
-SELECT declare_ref_class_with_funcs('http_request_rows');
-SELECT create_simple_serial('http_request_rows');
+COMMENT ON TABLE http_request_rows IS
+'PostgreSQL doesn''t allow us to have indices like unique
+constraints on fields of size above 1/3 of a buffer page,
+i.e. 2712 bytes which is a problem for text!';
+
+SELECT declare_abstract('http_request_rows');
+
+CREATE OR REPLACE
+FUNCTION max_indexable_field_size() RETURNS integer AS $$
+	SELECT 2712
+$$ LANGUAGE SQL IMMUTABLE;
+
+COMMENT ON FUNCTION max_indexable_field_size()
+IS 'PostgreSQL does not allow btree indices on fields above 1/3 of
+a buffer page, i.e. 2712 bytes.';
+
+CREATE TABLE IF NOT EXISTS http_small_request_rows (
+	PRIMARY KEY(ref),
+  CONSTRAINT http_small_request_rows__small
+		CHECK (octet_length(value_) < max_indexable_field_size()),
+	UNIQUE(name_, value_)
+) INHERITS (http_request_rows);
+
+SELECT declare_ref_class_with_funcs('http_small_request_rows');
+SELECT create_simple_serial('http_small_request_rows');
+SELECT create_key_triggers_for('http_small_request_rows', 'http_request_keys');
+
+CREATE TABLE IF NOT EXISTS http_big_request_rows (
+	PRIMARY KEY(ref),
+  CONSTRAINT http_big_request_rows__big
+		CHECK (octet_length(value_) >= max_indexable_field_size()),
+	hash_ blob_hashes,
+	UNIQUE(name_, hash_)
+) INHERITS (http_request_rows);
+
+SELECT declare_ref_class_with_funcs('http_big_request_rows');
+SELECT create_simple_serial('http_big_request_rows');
+SELECT create_key_triggers_for('http_big_request_rows', 'http_request_keys');
 
 -- * http_response
 
 SELECT create_ref_type('http_response_refs');
 
+CREATE TABLE IF NOT EXISTS http_response_keys (
+	key http_response_refs PRIMARY KEY
+);
+
+SELECT create_key_trigger_functions_for('http_response_keys');
+
 CREATE TABLE IF NOT EXISTS http_response_rows (
 	ref http_response_refs PRIMARY KEY,
   name_ http_response_name_refs NOT NULL
 		REFERENCES http_response_name_rows,
-	value_ text NOT NULL
-	-- ,	UNIQUE (name_, value_) -- newdiff 2012-7-9!!
+	text_value text,
+	binary_value bytea,
+	CHECk(text_value IS NULL != binary_value IS NULL)
 );
-CREATE UNIQUE INDEX http_response_rows_ugly
-ON http_response_rows ((ref_ugly_text(name_, value_)));
-COMMENT ON INDEX http_response_rows_ugly IS
-'PostgreSQL does not like btree indices on text above 1/3 of
-a buffer page, i.e. 2712 bytes.  I might want to consider
-creating a hashed-text type to deal with such situations
-more generally.';
 
-DELETE FROM http_response_rows;
+COMMENT ON TABLE http_response_rows IS
+'What if we push the *_value fields into the appropriate child tables???
+Logically we should have four child tables for
+text/binary X big/small.  Pragmatically we may have very few
+small binary files, so the current system might want to stand.';
 
-SELECT create_handles_for('http_response_rows');
+SELECT declare_abstract('http_response_rows');
+
+CREATE TABLE IF NOT EXISTS http_big_response_rows (
+	hash_ blob_hashes NOT NULL
+) INHERITS (http_response_rows);
+
+SELECT declare_abstract('http_big_request_rows');
+
+CREATE TABLE IF NOT EXISTS http_small_text_response_rows (
+	PRIMARY KEY(ref),
+  CONSTRAINT http_small_text_response_rows__small CHECK (
+		text_value IS NOT NULL AND octet_length(text_value) < max_indexable_field_size()
+	),
+	UNIQUE(name_, text_value)
+) INHERITS (http_response_rows);
+
+SELECT declare_ref_class_with_funcs('http_small_text_response_rows');
+SELECT create_simple_serial('http_small_text_response_rows');
+SELECT create_key_triggers_for('http_small_text_response_rows', 'http_response_keys');
+SELECT create_handles_for('http_small_text_response_rows');
+
+CREATE TABLE IF NOT EXISTS http_big_text_response_rows (
+	PRIMARY KEY(ref),
+  CONSTRAINT http_big_text_response_rows__big CHECK (
+		text_value IS NOT NULL AND octet_length(text_value) >= max_indexable_field_size()
+	),
+	UNIQUE(name_, hash_)
+) INHERITS (http_big_response_rows);
+
+SELECT declare_ref_class_with_funcs('http_big_text_response_rows');
+SELECT create_simple_serial('http_big_text_response_rows');
+SELECT create_key_triggers_for('http_big_text_response_rows', 'http_response_keys');
+
+CREATE TABLE IF NOT EXISTS http_binary_response_rows (
+	PRIMARY KEY(ref),
+  constraint http_binary_response_rows__binary_value
+	CHECK (binary_value IS NOT NULL),
+	UNIQUE(name_, hash_)
+) INHERITS (http_big_response_rows);
+
+SELECT declare_ref_class_with_funcs('http_binary_response_rows');
+SELECT create_simple_serial('http_binary_response_rows');
+SELECT create_key_triggers_for('http_binary_response_rows', 'http_response_keys');
+
+DELETE FROM http_response_rows*;	-- including rows of child tables
 
 CREATE OR REPLACE
 FUNCTION try_http_response_name(http_response_refs) 
 RETURNS http_response_name_refs AS $$
-	SELECT name_ FROM http_response_rows WHERE ref = $1
+	SELECT name_ FROM http_response_rows* WHERE ref = $1
 $$ LANGUAGE sql STRICT;
 
 CREATE OR REPLACE
@@ -148,7 +221,7 @@ $$ LANGUAGE sql;
 SELECT declare_ref_class_with_funcs('http_response_rows');
 SELECT create_simple_serial('http_response_rows');
 
-INSERT INTO http_response_rows(ref, name_, value_)
+INSERT INTO http_small_text_response_rows(ref, name_, text_value)
 VALUES (http_response_nil(), http_response_name_nil(), '');
 
 -- * http_transfer
@@ -195,7 +268,7 @@ SELECT create_simple_serial('http_transfer_rows');
 -- * doc_langs_content_type
 
 CREATE TABLE IF NOT EXISTS doc_langs_content_type (
-	lang_ doc_lang_name_refs PRIMARY KEY,
+	lang doc_lang_name_refs PRIMARY KEY,
 	content_type text NOT NULL	
 );
 
