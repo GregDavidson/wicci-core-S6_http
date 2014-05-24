@@ -100,15 +100,6 @@ i.e. 2712 bytes which is a problem for text!';
 
 SELECT declare_abstract('http_request_rows');
 
-CREATE OR REPLACE
-FUNCTION max_indexable_field_size() RETURNS integer AS $$
-	SELECT 2712
-$$ LANGUAGE SQL IMMUTABLE;
-
-COMMENT ON FUNCTION max_indexable_field_size()
-IS 'PostgreSQL does not allow btree indices on fields above 1/3 of
-a buffer page, i.e. 2712 bytes.';
-
 CREATE TABLE IF NOT EXISTS http_small_request_rows (
 	PRIMARY KEY(ref),
   CONSTRAINT http_small_request_rows__small
@@ -124,7 +115,7 @@ CREATE TABLE IF NOT EXISTS http_big_request_rows (
 	PRIMARY KEY(ref),
   CONSTRAINT http_big_request_rows__big
 		CHECK (octet_length(value_) >= max_indexable_field_size()),
-	hash_ blob_hashes,
+	hash_ hashes,
 	UNIQUE(name_, hash_)
 ) INHERITS (http_request_rows);
 
@@ -160,7 +151,7 @@ small binary files, so the current system might want to stand.';
 SELECT declare_abstract('http_response_rows');
 
 CREATE TABLE IF NOT EXISTS http_big_response_rows (
-	hash_ blob_hashes NOT NULL
+	hash_ hashes NOT NULL
 ) INHERITS (http_response_rows);
 
 SELECT declare_abstract('http_big_request_rows');

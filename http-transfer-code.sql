@@ -107,7 +107,7 @@ CREATE OR REPLACE
 FUNCTION try_big_http_request(http_request_name_refs, text)
 RETURNS http_request_refs AS $$
   SELECT ref FROM http_big_request_rows
-	WHERE name_ = $1 AND hash_ = blob_hash($2)
+	WHERE name_ = $1 AND hash_ = hash($2)
 $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE
@@ -144,7 +144,7 @@ BEGIN
 		BEGIN
 			IF big THEN
 			 INSERT INTO http_big_request_rows(name_, value_, hash_)
-			 VALUES ($1, $2, blob_hash($2));
+			 VALUES ($1, $2, hash($2));
 		ELSE
 			 INSERT INTO http_small_request_rows(name_, value_)
 			 VALUES ($1, $2);
@@ -431,14 +431,14 @@ CREATE OR REPLACE
 FUNCTION try_http_big_text_response(http_response_name_refs, text)
 RETURNS http_response_refs AS $$
   SELECT ref FROM http_big_text_response_rows
-	WHERE name_ = $1 AND hash_ = blob_hash($2)
+	WHERE name_ = $1 AND hash_ = hash($2)
 $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE
 FUNCTION try_http_binary_response(http_response_name_refs, bytea)
 RETURNS http_response_refs AS $$
   SELECT ref FROM http_binary_response_rows
-	WHERE name_ = $1 AND hash_ = blob_hash($2)
+	WHERE name_ = $1 AND hash_ = hash($2)
 $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE
@@ -486,10 +486,10 @@ BEGIN
 		BEGIN
 			IF big IS NULL THEN
 				INSERT INTO http_binary_response_rows(name_, binary_value, hash_)
-				VALUES ($1, $3, blob_hash($3));
+				VALUES ($1, $3, hash($3));
 			ELSIF big THEN
 				INSERT INTO http_big_text_response_rows(name_, text_value, hash_)
-				VALUES ($1, $2, blob_hash($2));
+				VALUES ($1, $2, hash($2));
 			ELSE
 				INSERT INTO http_small_text_response_rows(name_, text_value)
 				VALUES ($1, $2);
