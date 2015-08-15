@@ -1,18 +1,16 @@
 -- * Header  -*-Mode: sql;-*-
 \ir settings.sql
-SELECT set_file('wicci-http.sql', '$Id');
+SELECT set_file('http-transfer-schema.sql', '$Id');
 
 -- Wicci abstractions for http requests and replies
 
 -- ** Copyright
 
--- Copyright (c) 2005-2012, J. Greg Davidson.
+-- Copyright (c) 2005-2015, J. Greg Davidson.
 -- You may use this file under the terms of the
 -- GNU AFFERO GENERAL PUBLIC LICENSE 3.0
 -- as specified in the file LICENSE.md included with this distribution.
 -- All other use requires my permission in writing.
-
--- SET ROLE TO WICCI1;
 
 -- * the header-name classes
 
@@ -139,7 +137,7 @@ CREATE TABLE IF NOT EXISTS http_response_rows (
 		REFERENCES http_response_name_rows,
 	text_value text,
 	binary_value bytea,
-	CHECk(text_value IS NULL != binary_value IS NULL)
+	CHECk( (text_value IS NULL) != (binary_value IS NULL) )
 );
 
 COMMENT ON TABLE http_response_rows IS
@@ -225,10 +223,9 @@ CREATE TABLE IF NOT EXISTS http_transfer_rows (
 	ref http_transfer_refs PRIMARY KEY,
 	when_ timestamp NOT NULL DEFAULT('now'),
 	request http_request_refs[],
---	url uri_refs DEFAULT NULL,		-- constructed from the request
---	cookies uri_query_refs DEFAULT NULL,		-- ditto
-	response http_response_refs[] DEFAULT NULL
---	req text											-- for debugging, will go away!
+	request_body blob_refs NOT NULL REFERENCES blob_rows,
+	response http_response_refs[] DEFAULT NULL,
+	response_body blob_refs REFERENCES blob_rows DEFAULT NULL
 );
 COMMENT ON TABLE http_transfer_rows IS
 'represents a wicci transfer; i.e. an http request or reply;

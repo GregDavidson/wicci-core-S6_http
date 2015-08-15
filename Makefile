@@ -5,4 +5,4 @@
 # All other use requires my permission in writing.
 include ../Makefile.wicci
 all: $(DepMakes) $(SchemaOut)
-include $(DepMakes)
+-include $(DepMakes)

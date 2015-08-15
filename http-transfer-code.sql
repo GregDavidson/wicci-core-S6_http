@@ -1,29 +1,20 @@
 -- * Header  -*-Mode: sql;-*-
 \ir settings.sql
-SELECT set_file('wicci-http.sql', '$Id');
+SELECT set_file('http-transfer-code.sql', '$Id');
 
 -- Wicci abstractions for http requests and replies
 
 -- ** Copyright
 
--- Copyright (c) 2005-2012, J. Greg Davidson.
+-- Copyright (c) 2005-2015, J. Greg Davidson.
 -- You may use this file under the terms of the
 -- GNU AFFERO GENERAL PUBLIC LICENSE 3.0
 -- as specified in the file LICENSE.md included with this distribution.
 -- All other use requires my permission in writing.
 
--- SET ROLE TO WICCI1;
 -- * http_request functions
 
 -- ** type http_request_refs methods
-
--- WHY DOES THIS EXIST??
--- CREATE OR REPLACE FUNCTION try_http_request(
--- 	http_request_refs, http_request_name_refs
--- ) RETURNS http_request_refs AS $$
---   SELECT $1 FROM http_request_rows
--- 	WHERE ref = $1 AND name_ = $2
--- $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE FUNCTION http_requests(
 	http_request_refs[], http_request_name_refs
@@ -84,17 +75,14 @@ $$ LANGUAGE SQL;
 CREATE OR REPLACE
 FUNCTION http_requests_text(http_request_refs[])
 RETURNS text  AS $$
-	SELECT array_to_string( ARRAY(
-		SELECT http_request_text(x) FROM unnest($1) x
-	), E'\n' )
+	SELECT array_to_string( texts, E'\n' )
+	|| CASE WHEN array_is_empty(texts) THEN '' ELSE E'\n' END
+	FROM
+	( SELECT ARRAY( SELECT http_request_text(x) FROM unnest($1) x ) ) foo(texts)
 $$ LANGUAGE sql;
 
-CREATE OR REPLACE
-FUNCTION http_requests_text(http_transfer_refs)
-RETURNS text  AS $$
-	SELECT http_requests_text(request)
-	FROM http_transfer_rows WHERE ref = $1
-$$ LANGUAGE sql;
+COMMENT ON FUNCTION http_requests_text(http_request_refs[])
+IS 'show each request as \\n-terminated line';
 
 CREATE OR REPLACE
 FUNCTION try_small_http_request(http_request_name_refs, text)
@@ -256,48 +244,41 @@ RETURNS http_request_refs[] AS $$
 $$ LANGUAGE SQL;
 
 CREATE OR REPLACE
-FUNCTION http_head(text)
-RETURNS http_request_refs[] AS $$
-  SELECT first_http_requests(lines[1]) || ARRAY(
-	  SELECT get_http_request(str_trim(line))
-		FROM unnest(lines[2:array_length(lines)]) line
-	) FROM string_to_array( regexp_replace($1, E'\n\t+', '', 'g'), E'\n') lines
+FUNCTION http_headers_lines(text) RETURNS text[] AS $$
+	SELECT string_to_array(str_trim_right(regexp_replace($1, E'\n\t+', '', 'g')), E'\n') lines
 $$ LANGUAGE SQL;
 
 CREATE OR REPLACE
-FUNCTION try_parse_http_head_body_(text, OUT text, OUT text) AS $$
-	SELECT head_body[1], head_body[2] FROM try_str_match(
-		regexp_replace($1, E'\r', '', 'g'),
-		E'^(.*?)(?:\n\n(.*))?$'
-	) head_body
-$$ LANGUAGE SQL STRICT;
-
-CREATE OR REPLACE
-FUNCTION try_parse_http_requests(text) 
+FUNCTION http_headers(text)
 RETURNS http_request_refs[] AS $$
-	SELECT http_head( _head )	|| CASE
-		WHEN _body IS NULL THEN '{}'::http_request_refs[]
-		ELSE  ARRAY[try_get_http_request(http_request_name_body(), _body)]
-		-- ARRAY[ ... ] non-strict, don't use COALESCE here!
-	END FROM
-		try_parse_http_head_body_($1) AS foo(_head, _body),
-		debug_enter('try_parse_http_requests(text)', $1)
-	WHERE _head IS NOT NULL
+  SELECT first_http_requests(str_trim(lines[1])) || ARRAY(
+	  SELECT get_http_request(str_trim(line))
+		FROM unnest(lines[2:array_length(lines)]) line
+	) FROM http_headers_lines($1) lines
+$$ LANGUAGE SQL;
+
+CREATE OR REPLACE
+FUNCTION try_parse_http_requests(bytea) 
+RETURNS http_request_refs[] AS $$
+	SELECT http_headers( headers_text ) FROM
+		regexp_replace(convert_from($1, 'LATIN1'), E'\r', '', 'g') headers_text,
+		debug_enter('try_parse_http_requests(bytea)', $1)
+	WHERE headers_text IS NOT NULL
 $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE
-FUNCTION parse_http_requests(text)
+FUNCTION parse_http_requests(bytea)
 RETURNS http_request_refs[] AS $$
 	SELECT non_null(
 		try_parse_http_requests($1),
-		'parse_http_requests(text)'
+		'parse_http_requests(bytea)'
 	)
 $$ LANGUAGE SQL;
 
 CREATE OR REPLACE
 FUNCTION try_get_http_requests_url(http_request_refs[]) 
 RETURNS uri_refs AS $$
-	SELECT try_get_uri( COALESCE($1^'host', '') || $1^'_url' )
+	SELECT try_get_uri( COALESCE($1^'host', '') || regexp_replace($1^'_url', '^/*', '/') )
 $$ LANGUAGE SQL STRICT;
 
 -- CREATE OR REPLACE
@@ -373,21 +354,21 @@ CREATE OPERATOR ^ (
 CREATE OR REPLACE
 FUNCTION http_small_response_text(http_response_refs)
 RETURNS text AS $$
-  SELECT http_response_name_text(name_) || text_value
+  SELECT http_response_name_text(name_) || ': ' || text_value
 	FROM http_small_text_response_rows WHERE ref = $1
 $$ LANGUAGE SQL;
 
 CREATE OR REPLACE
 FUNCTION http_big_response_text(http_response_refs)
 RETURNS text AS $$
-  SELECT http_response_name_text(name_) || md5(text_value)
+  SELECT http_response_name_text(name_) || ':big: ' || md5(text_value)
 	FROM http_big_text_response_rows WHERE ref = $1
 $$ LANGUAGE SQL;
 
 CREATE OR REPLACE
 FUNCTION http_binary_response_text(http_response_refs)
 RETURNS text AS $$
-  SELECT http_response_name_text(name_) || md5(binary_value)
+  SELECT http_response_name_text(name_) || ':binary: ' || md5(binary_value)
 	FROM http_binary_response_rows WHERE ref = $1
 $$ LANGUAGE SQL;
 
@@ -579,33 +560,34 @@ SELECT type_class_op_method(
 -- * http_transfer
 
 CREATE OR REPLACE FUNCTION try_new_http_transfer(
-	http_request_refs[],
+	headers http_request_refs[], body bytea,
 	OUT http_transfer_refs, OUT uri_refs, OUT uri_query_refs
 ) AS $$
-	INSERT INTO http_transfer_rows(request)	VALUES ($1)	RETURNING
-	ref, try_get_http_requests_url($1), get_http_requests_cookies($1)
+	INSERT INTO http_transfer_rows(request, request_body)
+	VALUES ( $1, get_blob($2) )
+	RETURNING	ref, try_get_http_requests_url($1), get_http_requests_cookies($1)
 $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE
 FUNCTION try_new_http_transfer(
-	text, OUT http_transfer_refs, OUT uri_refs, OUT uri_query_refs
+	headers bytea, body bytea, OUT http_transfer_refs, OUT uri_refs, OUT uri_query_refs
 ) AS $$
-	SELECT try_new_http_transfer(parse_http_requests($1))
-	FROM debug_enter('try_new_http_transfer(text)', $1)
+	SELECT try_new_http_transfer(parse_http_requests($1), $2)
+	FROM debug_enter('try_new_http_transfer(bytea, bytea)', $1)
 $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE
 FUNCTION new_http_transfer(
-	text, OUT http_transfer_refs, OUT uri_refs, OUT uri_query_refs
+	headers bytea, body bytea, OUT http_transfer_refs, OUT uri_refs, OUT uri_query_refs
 ) AS $$
 	SELECT _xfer, _url, _cookies
 	FROM
-		try_new_http_transfer($1) foo(_xfer, _url, _cookies),
-		debug_enter('new_http_transfer(text)', $1)
-	WHERE non_null(_xfer, 'new_http_transfer(text)') IS NOT NULL;
+		try_new_http_transfer($1, $2) foo(_xfer, _url, _cookies),
+		debug_enter('new_http_transfer(bytea, bytea)', $1) _this
+	WHERE non_null(_xfer, _this) IS NOT NULL;
 $$ LANGUAGE SQL;
-COMMENT ON FUNCTION new_http_transfer(text) IS
-'return http_transfer associated with text argument';
+COMMENT ON FUNCTION new_http_transfer(bytea, bytea) IS
+'return http_transfer associated with header bytea, body bytea arguments';
 
 CREATE OR REPLACE
 FUNCTION http_transfer_header_text_(http_request_refs)
@@ -614,20 +596,23 @@ RETURNS text AS $$
 			WHEN http_request_name_type() THEN value_
 			WHEN http_request_name_url() THEN ' ' || value_
 			WHEN http_request_name_protocol() THEN ' ' || value_
-			WHEN http_request_name_body() THEN E'\n\n' || value_
+--			WHEN http_request_name_body() THEN E'\n\n' || value_
 			WHEN http_request_name_nil() THEN ' ' || value_
 			ELSE E'\n' || http_request_text(ref)
 		END FROM http_request_rows WHERE ref = $1
 $$ LANGUAGE SQL;
 
 CREATE OR REPLACE
-FUNCTION http_requests_text(http_request_refs[])
+FUNCTION http_requests_text_(http_request_refs[])
 RETURNS text AS $$
 		SELECT array_to_string( ARRAY(
 			SELECT http_transfer_header_text_(hdr)
 			FROM unnest($1) hdr
-		), '' )
+		), '' ) || CASE WHEN array_is_empty($1) THEN '' ELSE E'\n' END
 $$ LANGUAGE SQL;
+
+COMMENT ON FUNCTION http_requests_text_(http_request_refs[])
+IS 'show the request array as a canonical text request';
 
 CREATE OR REPLACE
 FUNCTION http_transfer_text(http_transfer_refs)
@@ -635,12 +620,23 @@ RETURNS text AS $$
 	SELECT
 		ref::text || E'\n' ||
 		'when: ' || when_::text || E'\n' ||
-		E'requests:\n' || http_requests_text(request) ||
+		E'requests:\n' || http_requests_text_(request) ||
+		'requests body length: ' || blob_length(request_body) || ' bytes' ||
 		COALESCE(
 			E'responses:\n'::text || http_responses_text(response), ''
+		) ||
+		COALESCE(
+			'responses body length: ' || try_blob_length(response_body) || ' bytes', ''
 		)
 	FROM http_transfer_rows WHERE ref = $1
 $$ LANGUAGE SQL;
+
+CREATE OR REPLACE
+FUNCTION http_requests_text_(http_transfer_refs)
+RETURNS text  AS $$
+	SELECT http_requests_text_(request)
+	FROM http_transfer_rows WHERE ref = $1
+$$ LANGUAGE sql;
 
 -- ** http_transfer_classes declarations
 
@@ -678,12 +674,14 @@ CREATE OR REPLACE FUNCTION http_response_headers(
 	SELECT http_responses(http_transfer_responses($1), $2)
 $$ LANGUAGE SQL;
 
+-- obsoleted
 CREATE OR REPLACE FUNCTION set_http_transfer_responses(
-	http_transfer_refs, VARIADIC http_response_refs[]
+	 http_transfer_refs, http_response_refs[], bytea
 ) RETURNS http_transfer_refs AS $$
-	UPDATE http_transfer_rows
-		SET response = array_non_nulls($2)
-	WHERE ref = $1 AND response IS NULL
+	UPDATE http_transfer_rows	SET
+		 response = array_non_nulls($2),
+		 response_body = get_blob($3)
+	WHERE ref = $1 AND response IS NULL AND response_body IS NULL
 	RETURNING ref
 $$ LANGUAGE sql;
 
