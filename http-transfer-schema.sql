@@ -29,14 +29,14 @@ this is not a header value which came from the browser.';
 SELECT
 	create_const_ref_func('http_request_name_refs', '_type', -4),
 	create_const_ref_func('http_request_name_refs', '_url', -3),
-	create_const_ref_func('http_request_name_refs','_protocol',-2),
-	create_const_ref_func('http_request_name_refs', '_body', -1);
+	create_const_ref_func('http_request_name_refs','_protocol',-2);
+	-- create_const_ref_func('http_request_name_refs', '_body', -1);
 
 INSERT INTO http_request_name_rows(ref, name_) VALUES
 	(http_request_name_type(), '_type'),
 	(http_request_name_url(), '_url'),
-	(http_request_name_protocol(), '_protocol'),
-	(http_request_name_body(), '_body');
+	(http_request_name_protocol(), '_protocol');
+	-- (http_request_name_body(), '_body');
 
 -- SELECT create_name_ref_schema(
 -- 	'http_response_name', _norm := 'str_trim_lower(text)'
@@ -79,17 +79,31 @@ INSERT INTO http_response_name_rows(ref, name_) VALUES
 
 SELECT create_ref_type('http_request_refs');
 
+/*
 CREATE TABLE IF NOT EXISTS http_request_keys (
 	key http_request_refs PRIMARY KEY
 );
 
 SELECT create_key_trigger_functions_for('http_request_keys');
+*/
 
 CREATE TABLE IF NOT EXISTS http_request_rows (
 	ref http_request_refs NOT NULL,
   name_ http_request_name_refs NOT NULL,
-	value_ text NOT NULL
+	value_ text NOT NULL,
+	UNIQUE(name_, value_)
 );
+
+SELECT declare_ref_class_with_funcs('http_request_rows');
+SELECT create_simple_serial('http_request_rows');
+-- SELECT create_key_triggers_for('http_request_rows', 'http_request_keys');
+
+/*
+-- Previously I was encoding the request body as a
+-- request header so the request headers needed
+-- to be potentially quite large.  Now that request
+-- bodies are sent separately, we can go back to
+-- a simpler design.
 
 COMMENT ON TABLE http_request_rows IS
 'PostgreSQL doesn''t allow us to have indices like unique
@@ -120,6 +134,7 @@ CREATE TABLE IF NOT EXISTS http_big_request_rows (
 SELECT declare_ref_class_with_funcs('http_big_request_rows');
 SELECT create_simple_serial('http_big_request_rows');
 SELECT create_key_triggers_for('http_big_request_rows', 'http_request_keys');
+*/
 
 -- * http_response
 
@@ -141,7 +156,10 @@ CREATE TABLE IF NOT EXISTS http_response_rows (
 );
 
 COMMENT ON TABLE http_response_rows IS
-'What if we push the *_value fields into the appropriate child tables???
+'We''re reinventing the wheel here - we could use {small,big}_text_string_rows
+and blob_rows - or even just blob_rows for the win.!!!
+---
+What if we push the *_value fields into the appropriate child tables???
 Logically we should have four child tables for
 text/binary X big/small.  Pragmatically we may have very few
 small binary files, so the current system might want to stand.';
@@ -152,7 +170,7 @@ CREATE TABLE IF NOT EXISTS http_big_response_rows (
 	hash_ hashes NOT NULL
 ) INHERITS (http_response_rows);
 
-SELECT declare_abstract('http_big_request_rows');
+SELECT declare_abstract('http_big_response_rows');
 
 CREATE TABLE IF NOT EXISTS http_small_text_response_rows (
 	PRIMARY KEY(ref),
@@ -185,6 +203,9 @@ CREATE TABLE IF NOT EXISTS http_binary_response_rows (
 	CHECK (binary_value IS NOT NULL),
 	UNIQUE(name_, hash_)
 ) INHERITS (http_big_response_rows);
+
+COMMENT ON TABLE http_binary_response_rows IS
+'This is totally redundant with blobs!!';
 
 SELECT declare_ref_class_with_funcs('http_binary_response_rows');
 SELECT create_simple_serial('http_binary_response_rows');
@@ -224,8 +245,8 @@ CREATE TABLE IF NOT EXISTS http_transfer_rows (
 	when_ timestamp NOT NULL DEFAULT('now'),
 	request http_request_refs[],
 	request_body blob_refs NOT NULL REFERENCES blob_rows,
-	response http_response_refs[] DEFAULT NULL,
-	response_body blob_refs REFERENCES blob_rows DEFAULT NULL
+	response http_response_refs[] DEFAULT NULL -- ,
+	-- response_body blob_refs REFERENCES blob_rows DEFAULT NULL
 );
 COMMENT ON TABLE http_transfer_rows IS
 'represents a wicci transfer; i.e. an http request or reply;
