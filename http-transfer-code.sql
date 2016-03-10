@@ -260,27 +260,8 @@ SELECT type_class_op_method(
 	'http_request_refs', 'http_request_rows',
 	'ref_text_op(refs)', 'http_request_text(http_request_refs)'
 );
-<<<<<<< HEAD
 
 /*
-SELECT type_class_io(
-	'http_request_refs', 'http_request_rows',
-	'http_request_refs(text)', 'http_request_text(http_request_refs)'
-);
-*/
-
-/*
-=======
-
-/*
-SELECT type_class_io(
-	'http_request_refs', 'http_request_rows',
-	'http_request_refs(text)', 'http_request_text(http_request_refs)'
-);
-*/
-
-/*
->>>>>>> eef99f2bba7fbc10e3dc9e252c6a1b0daeaed457
 SELECT type_class_op_method(
 	'http_request_refs', 'http_small_request_rows',
 	'ref_text_op(refs)', 'http_small_request_text(http_request_refs)'
@@ -354,13 +335,8 @@ CREATE OR REPLACE
 FUNCTION try_parse_http_requests(bytea) 
 RETURNS http_request_refs[] AS $$
 	SELECT http_headers( headers_text ) FROM
-<<<<<<< HEAD
-		regexp_replace(convert_from($1, 'LATIN1'), E'\r', '', 'g') headers_text,
-		debug_enter('try_parse_http_requests(bytea)', latin1($1))
-=======
 		regexp_replace(latin1($1), E'\r', '', 'g') headers_text,
-		debug_enter('try_parse_http_requests(bytea)', $1)
->>>>>>> eef99f2bba7fbc10e3dc9e252c6a1b0daeaed457
+		debug_enter('try_parse_http_requests(bytea)', latin1($1))
 	WHERE headers_text IS NOT NULL
 $$ LANGUAGE SQL STRICT;
 
