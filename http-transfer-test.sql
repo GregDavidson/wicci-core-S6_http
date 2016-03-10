@@ -192,8 +192,6 @@ SELECT test_func(
 
 -- * http_transfer
 
--- I need tests for response_body values!!!
-
 SELECT COALESCE(
 	http_transfer_rows_ref(x), http_transfer_rows_ref(
 		x, new_http_xfer(
