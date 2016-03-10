@@ -17,14 +17,6 @@ SELECT set_file('http-transfer-test.sql', '$Id');
 
 -- * Test Functions
 
-CREATE OR REPLACE FUNCTION latin1(text) RETURNS bytea AS $$
-	SELECT convert_to($1, 'LATIN1')
-$$ LANGUAGE sql STRICT;
-
-CREATE OR REPLACE FUNCTION latin1(bytea) RETURNS text AS $$
-	SELECT convert_from($1, 'LATIN1')
-$$ LANGUAGE sql STRICT;
-
 CREATE OR REPLACE
 FUNCTION drop_http_response(http_transfer_refs)
 RETURNS http_transfer_refs  AS $$
@@ -61,7 +53,7 @@ FUNCTION new_http_xfer_(text, text = '') RETURNS http_transfer_refs AS $$
 $$ LANGUAGE SQL STRICT;
 
 CREATE OR REPLACE FUNCTION hubba_bytes() RETURNS bytea AS $$
-	SELECT convert_to(	E'Hubba\r\nHubba\r\n', 'latin1' )
+	SELECT latin1(	E'Hubba\r\nHubba\r\n' )
 $$ LANGUAGE SQL IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION hubba_length() RETURNS bigint AS $$

@@ -3,11 +3,13 @@
 *.i2
 *.o
 *.so
+*-html.sql
 *.sql-out
 *.sql-out-err
 *.ed
 *.foo
 foo.*
+*.foo.sql
 TAGS
 TAGS-*
 Limbo

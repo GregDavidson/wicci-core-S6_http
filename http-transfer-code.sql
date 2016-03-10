@@ -14,6 +14,24 @@ SELECT set_file('http-transfer-code.sql', '$Id');
 
 -- * http_request functions
 
+
+-- ** UTF8 <-> LATIN1 conversion
+
+CREATE OR REPLACE FUNCTION latin1(text) RETURNS bytea AS $$
+	SELECT convert_to($1, 'LATIN1')
+$$ LANGUAGE sql STRICT;
+
+COMMENT ON FUNCTION latin1(text)
+IS 'Convert text (probably UTF8 encoded) to LATIN1 encoded bytea';
+
+CREATE OR REPLACE FUNCTION latin1(bytea) RETURNS text AS $$
+	SELECT convert_from($1, 'LATIN1')
+$$ LANGUAGE sql STRICT;
+
+COMMENT ON FUNCTION latin1(bytea)
+IS 'Convert bytea to text (presumably UTF8 encoded);
+We are assuming that the bytea IS latin1 encoded text!!';
+
 -- ** type http_request_refs methods
 
 CREATE OR REPLACE FUNCTION http_requests(
@@ -242,6 +260,7 @@ SELECT type_class_op_method(
 	'http_request_refs', 'http_request_rows',
 	'ref_text_op(refs)', 'http_request_text(http_request_refs)'
 );
+<<<<<<< HEAD
 
 /*
 SELECT type_class_io(
@@ -251,6 +270,17 @@ SELECT type_class_io(
 */
 
 /*
+=======
+
+/*
+SELECT type_class_io(
+	'http_request_refs', 'http_request_rows',
+	'http_request_refs(text)', 'http_request_text(http_request_refs)'
+);
+*/
+
+/*
+>>>>>>> eef99f2bba7fbc10e3dc9e252c6a1b0daeaed457
 SELECT type_class_op_method(
 	'http_request_refs', 'http_small_request_rows',
 	'ref_text_op(refs)', 'http_small_request_text(http_request_refs)'
@@ -324,8 +354,13 @@ CREATE OR REPLACE
 FUNCTION try_parse_http_requests(bytea) 
 RETURNS http_request_refs[] AS $$
 	SELECT http_headers( headers_text ) FROM
+<<<<<<< HEAD
 		regexp_replace(convert_from($1, 'LATIN1'), E'\r', '', 'g') headers_text,
 		debug_enter('try_parse_http_requests(bytea)', latin1($1))
+=======
+		regexp_replace(latin1($1), E'\r', '', 'g') headers_text,
+		debug_enter('try_parse_http_requests(bytea)', $1)
+>>>>>>> eef99f2bba7fbc10e3dc9e252c6a1b0daeaed457
 	WHERE headers_text IS NOT NULL
 $$ LANGUAGE SQL STRICT;
 
